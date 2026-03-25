@@ -1,135 +1,137 @@
-const cookieParser = require('cookie-parser');
-const bcrypt = require('bcryptjs');
-const express = require('express');
-const uuid = require('uuid');
-const app = express();
-const DB = require('./database.js');
+import path from 'path';
+import { fileURLToPath } from 'url';
+import cookieParser from 'cookie-parser';
+import bcrypt from 'bcryptjs';
+import express from 'express';
+import { v4 as uuidv4 } from 'uuid';
+import * as DB from './database.js';
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const publicPath = path.join(__dirname, 'public');
+
+const app = express();
 const authCookieName = 'token';
 
 // The service port may be set on the command line
 const port = process.argv.length > 2 ? process.argv[2] : 3000;
 
-// JSON body parsing using built-in middleware
+// Middleware
 app.use(express.json());
-
-// Use the cookie parser middleware for tracking authentication tokens
 app.use(cookieParser());
-
-// Serve up the applications static content
-app.use(express.static('public'));
+app.use(express.static(publicPath));
 
 // Router for service endpoints
 const apiRouter = express.Router();
-app.use(`/api`, apiRouter);
+app.use('/api', apiRouter);
 
-// CreateAuth token for a new user
+// Create user
 apiRouter.post('/auth/create', async (req, res) => {
-  if (await findUser('email', req.body.email)) {
-    res.status(409).send({ msg: 'Existing user' });
-  } else {
-    const user = await createUser(req.body.email, req.body.password);
-
-    setAuthCookie(res, user.token);
-    res.send({ email: user.email });
-  }
+	if (await findUser('email', req.body.email)) {
+		res.status(409).send({ msg: 'Existing user' });
+	} else {
+		const user = await createUser(req.body.email, req.body.password);
+		setAuthCookie(res, user.token);
+		res.send({ email: user.email });
+	}
 });
 
-// GetAuth token for the provided credentials
+// Login
 apiRouter.post('/auth/login', async (req, res) => {
-  const user = await findUser('email', req.body.email);
-  if (user) {
-    if (await bcrypt.compare(req.body.password, user.password)) {
-      user.token = uuid.v4();
-      await DB.updateUser(user);
-      setAuthCookie(res, user.token);
-      res.send({ email: user.email });
-      return;
-    }
-  }
-  res.status(401).send({ msg: 'Unauthorized' });
+	const user = await findUser('email', req.body.email);
+	if (user) {
+		if (await bcrypt.compare(req.body.password, user.password)) {
+			user.token = uuidv4();
+			await DB.updateUser(user);
+			setAuthCookie(res, user.token);
+			res.send({ email: user.email });
+			return;
+		}
+	}
+	res.status(401).send({ msg: 'Unauthorized' });
 });
 
-// DeleteAuth token if stored in cookie
+// Logout
 apiRouter.delete('/auth/logout', async (req, res) => {
-  const user = await findUser('token', req.cookies[authCookieName]);
-  if (user) {
-    await DB.updateUserRemoveAuth(user);
-  }
-  res.clearCookie(authCookieName);
-  res.status(204).end();
+	const user = await findUser('token', req.cookies[authCookieName]);
+	if (user) {
+		await DB.updateUserRemoveAuth(user);
+	}
+	res.clearCookie(authCookieName);
+	res.status(204).end();
 });
 
-// Middleware to verify that the user is authorized to call an endpoint
+// Auth middleware
 const verifyAuth = async (req, res, next) => {
-  const user = await findUser('token', req.cookies[authCookieName]);
-  if (user) {
-    next();
-  } else {
-    res.status(401).send({ msg: 'Unauthorized' });
-  }
+	const user = await findUser('token', req.cookies[authCookieName]);
+	if (user) {
+		next();
+	} else {
+		res.status(401).send({ msg: 'Unauthorized' });
+	}
 };
 
-// GetScores
+// Get scores
 apiRouter.get('/scores', verifyAuth, async (req, res) => {
-  const scores = await DB.getHighScores();
-  res.send(scores);
+	const scores = await DB.getHighScores();
+	res.send(scores);
 });
 
-// SubmitScore
+// Submit score
 apiRouter.post('/score', verifyAuth, async (req, res) => {
-  const scores = await updateScores(req.body);
-  res.send(scores);
+	const scores = await updateScores(req.body);
+	res.send(scores);
 });
 
-// Default error handler
-app.use(function (err, req, res, next) {
-  res.status(500).send({ type: err.name, message: err.message });
+// Error handler
+app.use((err, req, res, next) => {
+	res.status(500).send({ type: err.name, message: err.message });
 });
 
-// Return the application's default page if the path is unknown
+// Fallback to index.html
 app.use((_req, res) => {
-  res.sendFile('index.html', { root: 'public' });
+	res.sendFile(path.join(publicPath, 'index.html'));
 });
 
-// updateScores considers a new score for inclusion in the high scores.
+// Helpers
 async function updateScores(newScore) {
-  await DB.addScore(newScore);
-  return DB.getHighScores();
+	await DB.addScore(newScore);
+	return DB.getHighScores();
 }
 
 async function createUser(email, password) {
-  const passwordHash = await bcrypt.hash(password, 10);
+	const passwordHash = await bcrypt.hash(password, 10);
 
-  const user = {
-    email: email,
-    password: passwordHash,
-    token: uuid.v4(),
-  };
-  await DB.addUser(user);
+	const user = {
+		email: email,
+		password: passwordHash,
+		token: uuidv4(),
+	};
 
-  return user;
+	await DB.addUser(user);
+	return user;
 }
 
 async function findUser(field, value) {
-  if (!value) return null;
+	if (!value) return null;
 
-  if (field === 'token') {
-    return DB.getUserByToken(value);
-  }
-  return DB.getUser(value);
+	if (field === 'token') {
+		return DB.getUserByToken(value);
+	}
+	return DB.getUser(value);
 }
 
-// setAuthCookie in the HTTP response
+// Cookie setup
 function setAuthCookie(res, authToken) {
-  res.cookie(authCookieName, authToken, {
-    maxAge: 1000 * 60 * 60 * 24 * 365,
-    secure: true,
-    httpOnly: true,
-    sameSite: 'strict',
-  });
+	res.cookie(authCookieName, authToken, {
+		maxAge: 1000 * 60 * 60 * 24 * 365,
+		secure: process.env.NODE_ENV === 'production',
+		httpOnly: true,
+		sameSite: 'strict',
+	});
 }
 
-const httpService = app.listen(port, () => {
-  console.log(`Listening on port ${port}`);
+// Start server
+app.listen(port, () => {
+	console.log(`Listening on port ${port}`);
 });
